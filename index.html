@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>xbattle — viewer</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #121212; overflow: hidden; height: 100%; }
+  #game { display: block; width: 100vw; height: 100vh; }
+  #narrator {
+    position: absolute; left: 50%; bottom: 6%; transform: translateX(-50%);
+    max-width: 80%; padding: 12px 20px; text-align: center;
+    color: #f5f5f5; background: rgba(0,0,0,.65); border-radius: 8px;
+    font: italic 20px Georgia, serif; opacity: 0; transition: opacity 1s;
+    pointer-events: none;
+  }
+  #narrator.show { opacity: 1; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="narrator"></div>
+<script>
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  const narrator = document.getElementById("narrator");
+  const MAX_GOLD = 100;
+  let fadeTimer = null;
+
+  function resize() { canvas.width = innerWidth; canvas.height = innerHeight; }
+  addEventListener("resize", resize); resize();
+
+  function drawState(s) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);  // clear every frame
+    const W = canvas.width * 0.42, H = 36, y = canvas.height / 2 - H / 2;
+    const aW = Math.min(s.base_A_gold, MAX_GOLD) / MAX_GOLD * W;  // blue L->R
+    const bW = Math.min(s.base_B_gold, MAX_GOLD) / MAX_GOLD * W;  // red R->L
+    ctx.fillStyle = "#1e88e5"; ctx.fillRect(canvas.width * 0.05, y, aW, H);
+    ctx.fillStyle = "#e53935"; ctx.fillRect(canvas.width * 0.95 - bW, y, bW, H);
+    ctx.fillStyle = "#aaa"; ctx.font = "16px sans-serif";
+    ctx.fillText("A " + s.base_A_gold + "  |  tick " + s.tick, canvas.width * 0.05, y - 10);
+    ctx.fillText("B " + s.base_B_gold, canvas.width * 0.95 - 60, y - 10);
+  }
+
+  function showNarration(text) {
+    narrator.textContent = text;
+    narrator.classList.add("show");               // fade in via CSS
+    clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(() => narrator.classList.remove("show"), 12000);  // fade out
+  }
+
+  function connect() {
+    const ws = new WebSocket("ws://localhost:8000/ws");
+    ws.onmessage = (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      switch (msg.type) {
+        case "game.state": drawState(msg.data); break;              // canvas 2D
+        case "narrator.broadcast": showNarration(msg.data.text); break;  // DOM overlay
+      }
+    };
+    ws.onclose = () => setTimeout(connect, 2000);  // auto-reconnect
+  }
+  connect();
+</script>
+</body>
+</html>
