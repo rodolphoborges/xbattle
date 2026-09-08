@@ -30,6 +30,12 @@ def _client() -> tuple[AsyncOpenAI, str]:
 async def generate_commentary(events: list) -> str:
     """Task C: call LLM with flushed events, return narration text."""
     client, model = _client()
+    # Reasoning models (e.g. Gemma via LM Studio) spend tokens thinking;
+    # 150 cuts the answer off (finish_reason=length, empty content). 500 fits.
+    try:
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "500"))
+    except (ValueError, TypeError):
+        max_tokens = 500
     user_prompt = f"Relatórios de batalha:\n{json.dumps(events, ensure_ascii=False)}"
     resp = await client.chat.completions.create(
         model=model,
@@ -38,7 +44,7 @@ async def generate_commentary(events: list) -> str:
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.9,
-        max_tokens=150,
+        max_tokens=max_tokens,
     )
     return (resp.choices[0].message.content or "").strip()
 

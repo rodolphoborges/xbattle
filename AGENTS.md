@@ -2,7 +2,7 @@
 
 ## Stack
 - Python 3.10+, `asyncio` + `redis.asyncio` mandatory. Only exception: `injector.py` uses blocking sync `redis` for CLI simplicity.
-- Deps: `pip install -r requirements.txt` (`redis`, `openai`, `python-dotenv`). Test-only: `pip install -q fakeredis`.
+- Deps: `pip install -r requirements.txt` (`redis`, `openai`, `python-dotenv`, `fastapi`/`uvicorn`, `edge-tts`, `pygame-ce`). Test-only: `pip install -q fakeredis`. NOTE: `pygame` has no py3.14 wheel (tries source build, fails) — use `pygame-ce` (drop-in, `import pygame` works).
 
 ## Services
 - Redis must be on `localhost:6379`. No Redis in this repo; Docker daemon is usually OFF on this Windows box — do not assume `docker run` works. Verify with `python -c "import redis.asyncio,asyncio; print(asyncio.run(redis.asyncio.Redis(decode_responses=True).ping()))"`.
@@ -13,19 +13,23 @@
 - `game.state`: `{"tick":int,"base_A_gold":int,"base_B_gold":int}` — every tick (0.2s).
 - `game.events`: `{"tick":int,"event_msg":str}` — spawn + donate.
 - `narrator.broadcast`: `{"text":str,"timestamp":int}` — produced by `cronista.py` only.
-- Run order: Redis → `python engine.py` → `python cronista.py` → `python injector.py` (3 terminals).
+- Run order: Redis → `python engine.py` → `python cronista.py` → `python injector.py` (3 terminals) + `uvicorn gateway:app --port 8000` for the viewer (open `http://localhost:8000`).
 
 ## Entrypoints / ownership
 - `engine.py`: `tick_loop(pub)` (sole writer, 5 tps, spawn at gold>=100 then reset) + `cmd_listener(pub)` (sole reader). Separate Redis conns for pub vs sub; `asyncio.gather` both in `main()`. Pass `pub` as arg, never global-None.
 - `injector.py`: blocking `input()` loop, parses `"A 50"`. No asyncio here.
 - `cronista.py`: `event_listener()` appends to global `event_buffer`; `chronicler_loop(pub)` sleeps 30s, snapshots with `list()` then `clear()` BEFORE the LLM call; `generate_commentary(events)` via `AsyncOpenAI`. Publish fallback on any exception, never crash.
+- `gateway.py`: `redis_pump()` (single task, subscribes `game.state` + `narrator.broadcast`, envelopes `{"type","data"}`, drops zombies on send error) + `/ws` endpoint + `GET /` serving `index.html`. `index.html`: full-screen Canvas bars (A blue L→R, B red R→L, max 100) + bottom `<div>` overlay for narration (fade in, 12s fade out), auto-reconnect 2s.
+- `locutor.py`: TTS worker, `asyncio.Queue` (producer `narrator.broadcast` → consumer serial). Voice `pt-BR-AntonioNeural` (override via `LOCUTOR_VOICE`, alt `pt-BR-FranciscaNeural`), overwrites `temp_audio.mp3` (`LOCUTOR_TEMP_FILE`). Consumer try/except per item so one failure never kills the loop. Run 4th: `python locutor.py` (needs audio output for OBS capture).
 
 ## Env / LLM (.env, loaded with optional `load_dotenv`)
-- `LLM_PROVIDER` (LOCAL|CLOUD), `LLM_BASE_URL` (default `http://localhost:11434/v1`), `LLM_API_KEY` (default `ollama`), `LLM_MODEL_NAME` (default `llama3:8b`). `_client()` reads env on every call — keep it dynamic for LOCAL↔CLOUD switching.
+- `LLM_PROVIDER` (LOCAL|CLOUD), `LLM_BASE_URL` (default `http://localhost:11434/v1`), `LLM_API_KEY` (default `ollama`), `LLM_MODEL_NAME` (default `llama3:8b`), `LLM_MAX_TOKENS` (default `500`). `_client()` reads env on every call — keep it dynamic for LOCAL↔CLOUD switching.
 - `SYSTEM_PROMPT` (pt-BR, sádico/sarcástico) is spec-frozen — do not reword. `FALLBACK_TEXT` must stay non-empty, no emojis/hashtags.
+- Local LM Studio (this box): server at `http://localhost:1234/v1`, chat model `google/gemma-4-12b`, dummy key `lm-studio`. `.env` is gitignored — never commit it. List models via `GET /v1/models`.
+- Reasoning models (Gemma) burn tokens thinking: with `max_tokens=150` the reply comes back empty (`finish_reason=length`, text in `reasoning_content`). Keep default `500`; verified working 2026-09-08 with gemma-4-12b.
 
 ## Gotchas
 - Always ignore pubsub subscribe-acks: `if msg.get("type") != "message": continue`, plus `try/except (JSONDecodeError, TypeError)` and `(ValueError, TypeError)` on donate value.
 - `timestamp` is `int(time.time())`, not float.
-- `AsyncOpenAI(..., timeout=25.0)`, `temperature=0.9`, `max_tokens=150`.
-- PowerShell quoting breaks `python -c` with nested f-strings/quotes — write temp `_check_*.py` files for tests, delete after. Also delete `__pycache__` after test runs to keep the 4-file layout.
+- `AsyncOpenAI(..., timeout=25.0)`, `temperature=0.9`, `max_tokens` from `LLM_MAX_TOKENS` (default 500).
+- PowerShell quoting breaks `python -c` with nested f-strings/quotes — write temp `_check_*.py` files for tests, delete after. Also delete `__pycache__` after test runs.
