@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>xbattle — viewer</title>
+<title>xbattle — campo de batalha</title>
 <style>
-  html, body { margin: 0; padding: 0; background: #121212; overflow: hidden; height: 100%; }
-  #game { display: block; width: 100vw; height: 100vh; }
+  html, body { margin: 0; padding: 0; background: #0d0d0d; overflow: hidden; height: 100%; }
+  #game { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
   #narrator {
-    position: absolute; left: 50%; bottom: 6%; transform: translateX(-50%);
-    max-width: 80%; padding: 12px 20px; text-align: center;
-    color: #f5f5f5; background: rgba(0,0,0,.65); border-radius: 8px;
-    font: italic 20px Georgia, serif; opacity: 0; transition: opacity 1s;
+    position: absolute; left: 50%; bottom: 5%; transform: translateX(-50%);
+    max-width: 76%; padding: 12px 22px; text-align: center;
+    color: #f5f5f5; background: rgba(0,0,0,.7); border: 2px solid #8a6d2f; border-radius: 4px;
+    font: italic 19px Georgia, serif; opacity: 0; transition: opacity 1s;
     pointer-events: none;
   }
   #narrator.show { opacity: 1; }
@@ -21,32 +21,190 @@
 <canvas id="game"></canvas>
 <div id="narrator"></div>
 <script>
+  // ===== setup: pixelado de verdade (sem suavização) =====
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
   const narrator = document.getElementById("narrator");
-  const MAX_GOLD = 100;
-  let fadeTimer = null;
+  const MAX_GOLD = 100, PX = 3;  // escala dos sprites
+  const COL = { A: "#3b82f6", Ad: "#1e40af", B: "#ef4444", Bd: "#7f1d1d",
+                stone: "#9aa0a6", stoneD: "#5f6368", grass1: "#2d6a2d",
+                grass2: "#2a612a", road: "#8a6d2f", roadD: "#6e5623",
+                skin: "#f1c27d", wood: "#7c4a21", gold: "#ffd23f" };
+  let W = 0, H = 0, bg = null, fadeTimer = null;
 
-  function resize() { canvas.width = innerWidth; canvas.height = innerHeight; }
-  addEventListener("resize", resize); resize();
+  // ===== estado do mundo (só leitura do backend) =====
+  const world = { tick: 0, goldA: 0, goldB: 0,
+                  spawnedA: 0, spawnedB: 0, killsA: 0, killsB: 0,
+                  hpA: 100, hpB: 100, units: [], marks: [], coins: [], feed: [] };
+  const LANES = [-26, 0, 26];           // 3 fileiras na estrada
+  const SPEED = 16;                      // px/s: marcha lenta, cinematográfica
+  const MAX_UNITS = 60;
 
-  function drawState(s) {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);  // clear every frame
-    const W = canvas.width * 0.42, H = 36, y = canvas.height / 2 - H / 2;
-    const aW = Math.min(s.base_A_gold, MAX_GOLD) / MAX_GOLD * W;  // blue L->R
-    const bW = Math.min(s.base_B_gold, MAX_GOLD) / MAX_GOLD * W;  // red R->L
-    ctx.fillStyle = "#1e88e5"; ctx.fillRect(canvas.width * 0.05, y, aW, H);
-    ctx.fillStyle = "#e53935"; ctx.fillRect(canvas.width * 0.95 - bW, y, bW, H);
-    ctx.fillStyle = "#aaa"; ctx.font = "16px sans-serif";
-    ctx.fillText("A " + s.base_A_gold + "  |  tick " + s.tick, canvas.width * 0.05, y - 10);
-    ctx.fillText("B " + s.base_B_gold, canvas.width * 0.95 - 60, y - 10);
+  function resize() {
+    W = canvas.width = innerWidth; H = canvas.height = innerHeight;
+    bg = document.createElement("canvas"); bg.width = W; bg.height = H;
+    paintBackground(bg.getContext("2d"));
+  }
+  addEventListener("resize", resize);
+
+  // determinístico: mesmo campo todo frame, sem custo
+  function hash(x, y) { let h = x * 374761393 + y * 668265263; h ^= h >> 13; return ((h * 1274126177) >> 16) & 7; }
+
+  function paintBackground(g) {
+    const T = 24;
+    for (let y = 0; y < H; y += T) for (let x = 0; x < W; x += T) {
+      g.fillStyle = ((x + y) / T) % 2 ? COL.grass1 : COL.grass2;
+      g.fillRect(x, y, T, T);
+      if (hash(x, y) === 0) { g.fillStyle = COL.grass2; g.fillRect(x + 6, y + 10, 4, 4); }
+    }
+    const ry = H / 2;  // estrada de terra
+    g.fillStyle = COL.roadD; g.fillRect(0, ry - 52, W, 104);
+    g.fillStyle = COL.road; g.fillRect(0, ry - 44, W, 88);
+    for (let x = 0; x < W; x += 32) { g.fillStyle = COL.roadD; g.fillRect(x, ry - 3, 14, 6); }
   }
 
+  function castleX(side) { return side === "A" ? 70 : W - 70; }
+
+  // castelo procedural em grade: torres + ameias + portão + bandeira 2 frames
+  function drawCastle(g, side, frame) {
+    const cx = castleX(side), base = H / 2 + 60, c = side === "A" ? COL.A : COL.B;
+    const put = (dx, dy, w, h, col) => { g.fillStyle = col; g.fillRect(cx + dx, base + dy, w, h); };
+    put(-44, -120, 88, 120, COL.stone);                       // corpo
+    for (let i = 0; i < 4; i++) { put(-44 + i * 24, -134, 14, 14, COL.stone); }  // ameias
+    put(-58, -150, 26, 150, COL.stoneD); put(32, -150, 26, 150, COL.stoneD);     // torres
+    for (let i = 0; i < 2; i++) { put(-58 + i * 14, -162, 8, 12, COL.stoneD); put(32 + i * 14, -162, 8, 12, COL.stoneD); }
+    put(-14, -46, 28, 46, "#222");                                // portão
+    put(-30, -100, 12, 12, "#222"); put(18, -100, 12, 12, "#222"); // janelas
+    put(-2, -186, 4, 52, COL.wood);                               // mastro
+    const wave = frame % 2 ? 6 : 0;
+    put(2, -186, 30, 18, c); put(2 + 24 - wave, -186, 6, 18, c);  // bandeira
+    return { x: cx, y: base - 60 };
+  }
+
+  // soldadinho 8x12: elmo + corpo da facção + pernas que alternam (2 frames)
+  function drawSoldier(g, u) {
+    const c = u.side === "A" ? COL.A : COL.B, d = u.side === "A" ? COL.Ad : COL.Bd;
+    const x = Math.round(u.x), y = Math.round(u.y), leg = u.frame % 2 ? 2 : -2;
+    g.fillStyle = COL.skin; g.fillRect(x - 3, y - 30, 6, 6);       // rosto
+    g.fillStyle = d; g.fillRect(x - 4, y - 34, 8, 5);              // elmo
+    g.fillStyle = c; g.fillRect(x - 4, y - 24, 8, 12);             // corpo
+    g.fillStyle = "#222"; g.fillRect(x - 4, y - 12, 3, 8 + leg); g.fillRect(x + 1, y - 12, 3, 8 - leg); // pernas
+    const dir = u.side === "A" ? 1 : -1;                          // arma aponta p/ frente
+    if (u.kind === 0) { g.fillStyle = "#ddd"; g.fillRect(x + dir * 5, y - 26, 2, 12); }       // espada
+    else if (u.kind === 1) { g.fillStyle = COL.wood; g.fillRect(x + dir * 5, y - 28, 2, 14); }// arco
+    else { g.fillStyle = COL.wood; g.fillRect(x + dir * 4, y - 30, 2, 18); }                  // lança
+  }
+
+  function bar(g, x, y, w, h, frac, col) {
+    g.fillStyle = "#111"; g.fillRect(x - 2, y - 2, w + 4, h + 4);
+    g.fillStyle = col; g.fillRect(x, y, Math.round(w * Math.max(0, Math.min(1, frac))), h);
+  }
+
+  function feed(text) {
+    const t = world.tick;
+    const mm = String(Math.floor(t / 60)).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
+    world.feed.unshift(`[${mm}:${ss}] ${text}`);
+    if (world.feed.length > 8) world.feed.pop();
+  }
+
+  // ===== eventos do backend viram entidades =====
+  function onSpawn(side) {
+    if (world.units.length >= MAX_UNITS) return;
+    const n = side === "A" ? world.spawnedA++ : world.spawnedB++;
+    world.units.push({ side, kind: n % 3, x: castleX(side) + (side === "A" ? 50 : -50),
+                       y: H / 2 + LANES[n % 3], frame: 0, acc: 0 });
+  }
+
+  function update(dt) {
+    for (const u of world.units) { u.x += (u.side === "A" ? 1 : -1) * SPEED * dt; u.acc += dt; if (u.acc > 0.28) { u.acc = 0; u.frame++; } }
+    // encontros: inimigos que se cruzam na mesma fileira lutam
+    for (let i = world.units.length - 1; i >= 0; i--) for (let j = i - 1; j >= 0; j--) {
+      const a = world.units[i], b = world.units[j];
+      if (a.side !== b.side && Math.abs(a.y - b.y) < 14 && Math.abs(a.x - b.x) < 10) {
+        world.units.splice(i, 1); world.units.splice(j, 1);
+        world.marks.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, life: 1 });
+        if (a.side === "A") world.killsA++; else world.killsB++;
+        break;
+      }
+    }
+    // cerco: chegou ao castelo inimigo
+    for (let i = world.units.length - 1; i >= 0; i--) {
+      const u = world.units[i], target = castleX(u.side === "A" ? "B" : "A");
+      if ((u.side === "A" && u.x >= target - 50) || (u.side === "B" && u.x <= target + 50)) {
+        world.units.splice(i, 1);
+        if (u.side === "A") world.hpB = Math.max(0, world.hpB - 2); else world.hpA = Math.max(0, world.hpA - 2);
+        world.marks.push({ x: target, y: H / 2 - 40, life: 1 });
+      }
+    }
+    world.hpA = Math.min(100, world.hpA + dt * 0.4); world.hpB = Math.min(100, world.hpB + dt * 0.4); // regen
+    for (const m of world.marks) m.life -= dt * 0.8;
+    world.marks = world.marks.filter(m => m.life > 0);
+    for (const c of world.coins) { c.y -= dt * 30; c.life -= dt; }
+    world.coins = world.coins.filter(c => c.life > 0);
+  }
+
+  function render(frame) {
+    ctx.drawImage(bg, 0, 0);
+    drawCastle(ctx, "A", frame); drawCastle(ctx, "B", frame);
+    for (const u of world.units) drawSoldier(ctx, u);
+    ctx.fillStyle = "#fff";
+    for (const m of world.marks) {  // clarão + ✕ do combate
+      ctx.globalAlpha = Math.max(0, m.life);
+      const s = 6 + (1 - m.life) * 22;
+      ctx.fillRect(m.x - s / 2, m.y - 2, s, 4); ctx.fillRect(m.x - 2, m.y - s / 2, 4, s);
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = COL.gold;
+    for (const c of world.coins) { ctx.globalAlpha = Math.max(0, c.life); ctx.fillRect(c.x, c.y, 4, 4); }
+    ctx.globalAlpha = 1;
+    hud(frame);
+  }
+
+  function hud(frame) {
+    ctx.font = "13px monospace";
+    const t = world.tick, hh = String(Math.floor(t / 3600)).padStart(2, "0"),
+          mm = String(Math.floor(t / 60) % 60).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
+    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(10, 10, 330, 66);   // placar campanha
+    ctx.fillStyle = "#fff";
+    ctx.fillText(`CAMPANHA ${hh}:${mm}:${ss}  tick ${t}`, 18, 30);
+    ctx.fillStyle = COL.A; ctx.fillText(`A ❚ sold ${world.spawnedA} kills ${world.killsA}`, 18, 50);
+    ctx.fillStyle = COL.B; ctx.fillText(`B ❚ sold ${world.spawnedB} kills ${world.killsB}`, 18, 68);
+    for (const side of ["A", "B"]) {  // tesouraria + HP sobre os castelos
+      const cx = castleX(side), gold = side === "A" ? world.goldA : world.goldB,
+            hp = side === "A" ? world.hpA : world.hpB;
+      bar(ctx, cx - 50, H / 2 - 215, 100, 8, gold / MAX_GOLD, COL.gold);
+      bar(ctx, cx - 50, H / 2 - 203, 100, 6, hp / 100, side === "A" ? COL.A : COL.B);
+    }
+    ctx.fillStyle = "rgba(0,0,0,.7)";  // feed de eventos
+    const fh = world.feed.length * 18 + 14;
+    ctx.fillRect(W - 330, 10, 320, fh);
+    ctx.font = "12px monospace";
+    world.feed.forEach((line, i) => { ctx.fillStyle = i ? "#bbb" : "#fff"; ctx.fillText(line.slice(0, 44), W - 320, 28 + i * 18); });
+  }
+
+  // ===== mensagens: estado interpola, eventos viram mundo =====
+  function onState(s) { world.tick = s.tick; world.goldA = s.base_A_gold; world.goldB = s.base_B_gold; }
+  function onEvent(e) {
+    const m = e.event_msg || "";
+    const sm = m.match(/Faction ([AB]) Spawn Soldier/);
+    if (sm) { onSpawn(sm[1]); feed(`⚔ ${sm[1]} recruta tropa`); return; }
+    const dm = m.match(/Donate \+(\d+) to ([AB])/);
+    if (dm) { const cx = castleX(dm[2]); for (let i = 0; i < 6; i++) world.coins.push({ x: cx - 20 + i * 8, y: H / 2 - 120, life: 1 }); feed(`🪙 +${dm[1]} p/ ${dm[2]}`); return; }
+    feed(m.slice(0, 40));
+  }
   function showNarration(text) {
-    narrator.textContent = text;
-    narrator.classList.add("show");               // fade in via CSS
+    narrator.textContent = text; narrator.classList.add("show");
     clearTimeout(fadeTimer);
-    fadeTimer = setTimeout(() => narrator.classList.remove("show"), 12000);  // fade out
+    fadeTimer = setTimeout(() => narrator.classList.remove("show"), 12000);
+  }
+
+  let last = performance.now(), frame = 0, facc = 0;
+  function loop(now) {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    facc += dt; if (facc > 0.5) { facc = 0; frame++; }  // bandeiras/anim em 2fps: leve
+    update(dt); render(frame);
+    requestAnimationFrame(loop);
   }
 
   function connect() {
@@ -54,13 +212,14 @@
     ws.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
-        case "game.state": drawState(msg.data); break;              // canvas 2D
-        case "narrator.broadcast": showNarration(msg.data.text); break;  // DOM overlay
+        case "game.state": onState(msg.data); break;
+        case "game.events": onEvent(msg.data); break;   // spawns viram soldados
+        case "narrator.broadcast": showNarration(msg.data.text); break;
       }
     };
-    ws.onclose = () => setTimeout(connect, 2000);  // auto-reconnect
+    ws.onclose = () => setTimeout(connect, 2000);
   }
-  connect();
+  resize(); connect(); requestAnimationFrame(loop);
 </script>
 </body>
 </html>

@@ -6,7 +6,7 @@ import redis.asyncio as redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-CHANNELS = ["game.state", "narrator.broadcast"]
+CHANNELS = ["game.state", "game.events", "narrator.broadcast"]
 
 clients: set[WebSocket] = set()  # active WS connections
 

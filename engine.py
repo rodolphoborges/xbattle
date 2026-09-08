@@ -2,7 +2,8 @@ import asyncio
 import json
 import redis.asyncio as redis
 
-TICK_RATE = 0.2  # 5 ticks/sec
+TICK_RATE = 1.0  # 1 tick/s: campanha lenta, observável a longo prazo
+SPAWN_AT = 100  # ouro p/ gerar um soldado (~100s natural por facção)
 tick = 0
 gold = {"A": 0, "B": 0}
 
@@ -14,7 +15,7 @@ async def tick_loop(pub: redis.Redis):
         tick += 1
         for faction in ("A", "B"):
             gold[faction] += 1  # +1 gold per tick
-            if gold[faction] >= 100:  # spawn threshold
+            if gold[faction] >= SPAWN_AT:  # limiar de spawn
                 gold[faction] = 0  # reset after spawn
                 await pub.publish("game.events", json.dumps(
                     {"tick": tick, "event_msg": f"Faction {faction} Spawn Soldier"}))
