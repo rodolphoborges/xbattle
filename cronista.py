@@ -12,11 +12,31 @@ except ImportError:
 import redis.asyncio as redis
 from openai import AsyncOpenAI
 
-SYSTEM_PROMPT = "Você é um deus sádico, sarcástico e observador de uma guerra medieval fútil. Você lê os relatórios das batalhas e os narra para o público. Regras estritas: 1) Resuma o caos em no máximo 2 frases curtas. 2) Seja irônico. 3) Não use emojis ou hashtags. 4) Se os eventos forem chatos, zombe da incompetência das facções."
+SYSTEM_PROMPT = "Você é um narrador frenético de eSports transmitindo uma guerra medieval ao vivo. Regras absolutas: 1) Responda APENAS com a narração — sem introdução, confirmação ou formalidade. 2) No máximo 3 frases curtas, altamente dramáticas, baseadas SOMENTE nos eventos recebidos. 3) Sem emojis, hashtags ou explicação do seu raciocínio."
 
 FALLBACK_TEXT = "Os idiotas continuaram se matando e nem isso fizeram direito."
 
 event_buffer = []  # sliding window of game.events
+flush_signal = asyncio.Event()  # listener -> loop: flush sem bloquear o Redis
+
+
+def _threshold() -> int:
+    try:
+        return int(os.getenv("CRONISTA_THRESHOLD", "5"))
+    except (ValueError, TypeError):
+        return 5
+
+
+def _max_silence() -> float:
+    try:
+        return float(os.getenv("CRONISTA_MAX_SILENCE", "10"))
+    except (ValueError, TypeError):
+        return 10.0
+
+
+def _is_critical(evt: dict) -> bool:
+    """Spawn = narração imediata; resto acumula até threshold ou silêncio."""
+    return "spawn" in str(evt.get("event_msg", "")).lower()
 
 
 def _client() -> tuple[AsyncOpenAI, str]:
@@ -30,27 +50,32 @@ def _client() -> tuple[AsyncOpenAI, str]:
 async def generate_commentary(events: list) -> str:
     """Task C: call LLM with flushed events, return narration text."""
     client, model = _client()
-    # Reasoning models (e.g. Gemma via LM Studio) spend tokens thinking;
-    # 150 cuts the answer off (finish_reason=length, empty content). 500 fits.
+    # Reasoning models (e.g. Gemma via LM Studio) spend a variable
+    # 300-700+ tokens thinking; a tight budget truncates the answer
+    # (finish_reason=length, empty content). Retry = independent sample.
     try:
-        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "500"))
+        max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1200"))
     except (ValueError, TypeError):
-        max_tokens = 500
+        max_tokens = 1200
     user_prompt = f"Relatórios de batalha:\n{json.dumps(events, ensure_ascii=False)}"
-    resp = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.9,
-        max_tokens=max_tokens,
-    )
-    return (resp.choices[0].message.content or "").strip()
+    for _ in range(2):
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.9,
+            max_tokens=max_tokens,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        if text:
+            return text
+    return ""
 
 
 async def event_listener():
-    """Task A: subscribe game.events, append to buffer."""
+    """Task A: subscribe game.events, append; sinaliza flush sem bloquear."""
     sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
     ps = sub.pubsub()
     await ps.subscribe("game.events")
@@ -58,19 +83,27 @@ async def event_listener():
         if msg.get("type") != "message":
             continue
         try:
-            event_buffer.append(json.loads(msg["data"]))
+            evt = json.loads(msg["data"])
         except (json.JSONDecodeError, TypeError):
             continue
+        event_buffer.append(evt)
+        if _is_critical(evt) or len(event_buffer) >= _threshold():
+            flush_signal.set()  # threshold atingido -> flush imediato
 
 
 async def chronicler_loop(pub: redis.Redis):
-    """Task B: every 30s flush window -> LLM -> narrator.broadcast."""
+    """Task B: flush imediato no gatilho; fallback após MAX_SILENCE de silêncio."""
     while True:
-        await asyncio.sleep(30)
+        try:
+            await asyncio.wait_for(flush_signal.wait(), timeout=_max_silence())
+        except (asyncio.TimeoutError, TimeoutError):
+            pass  # silêncio: descarrega o que acumulou (ou pula se vazio)
         if not event_buffer:
+            flush_signal.clear()
             continue
         events = list(event_buffer)
-        event_buffer.clear()  # instant clear to avoid race
+        event_buffer.clear()  # bloco síncrono: sem race com o listener
+        flush_signal.clear()  # rearma o timer p/ o próximo ciclo
         try:
             text = await generate_commentary(events)
             if not text:
