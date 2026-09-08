@@ -1,6 +1,9 @@
 .env
 __pycache__/
+logs/
 temp_audio.mp3
+tts_*.mp3
 _smoke*.py
 _dbg_*.py
 _check_*.py
+_v_*.py
