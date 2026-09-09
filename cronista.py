@@ -35,8 +35,12 @@ def _max_silence() -> float:
 
 
 def _is_critical(evt: dict) -> bool:
-    """Spawn = narração imediata; resto acumula até threshold ou silêncio."""
-    return "spawn" in str(evt.get("event_msg", "")).lower()
+    """Spawn/cerco/vitória = narração imediata; resto acumula até threshold ou silêncio."""
+    m = str(evt.get("event_msg", "")).lower()
+    return any(k in m for k in ("spawn", "atinge", "hits", "destrói", "destroys",
+        "vence", "wins", "campanha", "campaign", "cura", "heal", "rally",
+        "curse", "maldicao", "omen", "pressagio", "eclipse", "nevoa", "colheita",
+        "momentum", "era", "morte subita", "sudden"))
 
 
 def _client() -> tuple[AsyncOpenAI, str]:
@@ -76,19 +80,33 @@ async def generate_commentary(events: list) -> str:
 
 async def event_listener():
     """Task A: subscribe game.events, append; sinaliza flush sem bloquear."""
-    sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    ps = sub.pubsub()
-    await ps.subscribe("game.events")
-    async for msg in ps.listen():
-        if msg.get("type") != "message":
-            continue
+    while True:  # auto-reconnect: Redis caiu, reassina
+        sub = None
         try:
-            evt = json.loads(msg["data"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        event_buffer.append(evt)
-        if _is_critical(evt) or len(event_buffer) >= _threshold():
-            flush_signal.set()  # threshold atingido -> flush imediato
+            sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
+            ps = sub.pubsub()
+            await ps.subscribe("game.events")
+            async for msg in ps.listen():
+                if msg.get("type") != "message":
+                    continue
+                try:
+                    evt = json.loads(msg["data"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                event_buffer.append(evt)
+                if _is_critical(evt) or len(event_buffer) >= _threshold():
+                    flush_signal.set()  # threshold atingido -> flush imediato
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            print(f"[cronista] listener reconnecting: {e!r}")
+            await asyncio.sleep(2)
+        finally:
+            if sub is not None:
+                try:
+                    await sub.aclose()
+                except Exception:
+                    pass
 
 
 async def chronicler_loop(pub: redis.Redis):

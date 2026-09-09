@@ -8,92 +8,233 @@
   html, body { margin: 0; padding: 0; background: #0d0d0d; overflow: hidden; height: 100%; }
   #game { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
   #narrator {
-    position: absolute; left: 50%; bottom: 5%; transform: translateX(-50%);
-    max-width: 76%; padding: 12px 22px; text-align: center;
+    position: absolute; left: 50%; bottom: 4%; transform: translateX(-50%);
+    max-width: 70%; padding: 10px 20px; text-align: center;
     color: #f5f5f5; background: rgba(0,0,0,.7); border: 2px solid #8a6d2f; border-radius: 4px;
-    font: italic 19px Georgia, serif; opacity: 0; transition: opacity 1s;
+    font: italic 18px Georgia, serif; opacity: 0; transition: opacity 1s;
     pointer-events: none;
   }
   #narrator.show { opacity: 1; }
+  #rulesBtn {
+    position: absolute; right: 14px; bottom: 14px; width: 44px; height: 44px;
+    font-size: 22px; background: rgba(0,0,0,.65); border: 2px solid #8a6d2f;
+    border-radius: 6px; cursor: pointer;
+  }
+  #rules {
+    position: absolute; right: 14px; bottom: 66px; width: 320px; display: none;
+    background: #e8d5a3; color: #3a2a12; border: 3px solid #8a6d2f; border-radius: 4px;
+    font: 13px Georgia, serif; padding: 10px 14px;
+  }
+  #rules.show { display: block; }
+  #rules h3 { margin: 0 0 6px; font-size: 15px; text-align: center; }
+  #rules ul { margin: 0; padding-left: 18px; }
+  #rules li { margin: 3px 0; }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
 <div id="narrator"></div>
+<button id="rulesBtn" title="Leis da Guerra">📜</button>
+<div id="rules">
+  <h3>📜 LEIS DA GUERRA</h3>
+  <ul>
+    <li>Sussurre ao taverneiro (<i>injector</i>): <b>"A 50"</b> — o ouro cai do céu</li>
+    <li><b>100 ouro</b> forja <b>1 soldado</b> da facção</li>
+    <li>Marcha de <b>25s</b> até o castelo inimigo</li>
+    <li>Cada chegada: <b>-5 de vida</b> (castelos têm 100)</li>
+    <li>Castelo zerado = <b>VITÓRIA</b>, tudo congela 🏆</li>
+    <li>⚔ <b>guerreiro</b> &gt; <b>arqueiro</b> &gt; <b>mago</b> &gt; guerreiro (ninguém absoluto!)</li>
+    <li>🏹 arqueiro e mago atacam <b>à distância</b>; guerreiro no corpo a corpo</li>
+    <li> Nova guerra: qualquer donate após a vitória</li>
+  </ul>
+</div>
 <script>
-  // ===== setup: pixelado de verdade (sem suavização) =====
+  // ===== setup pixelado (sem suavização) =====
   const canvas = document.getElementById("game");
   const ctx = canvas.getContext("2d");
   ctx.imageSmoothingEnabled = false;
   const narrator = document.getElementById("narrator");
-  const MAX_GOLD = 100, PX = 3;  // escala dos sprites
+  const MAX_GOLD = 100, CASTLE_HP = 100;
   const COL = { A: "#3b82f6", Ad: "#1e40af", B: "#ef4444", Bd: "#7f1d1d",
                 stone: "#9aa0a6", stoneD: "#5f6368", grass1: "#2d6a2d",
                 grass2: "#2a612a", road: "#8a6d2f", roadD: "#6e5623",
-                skin: "#f1c27d", wood: "#7c4a21", gold: "#ffd23f" };
+                skin: "#f1c27d", wood: "#7c4a21", gold: "#ffd23f",
+                leaf: "#1f5c1f", leafD: "#174a17", rock: "#7a7f85",
+                water: "#2563eb", waterL: "#60a5fa", flame: ["#ef4444", "#f97316", "#ffd23f"] };
   let W = 0, H = 0, bg = null, fadeTimer = null;
 
-  // ===== estado do mundo (só leitura do backend) =====
-  const world = { tick: 0, goldA: 0, goldB: 0,
+  // ===== mundo: números vêm do backend; visual é só leitura =====
+  const world = { tick: 0, goldA: 0, goldB: 0, hpA: CASTLE_HP, hpB: CASTLE_HP,
+                  marchA: 0, marchB: 0, winsA: 0, winsB: 0, gameOver: null,
                   spawnedA: 0, spawnedB: 0, killsA: 0, killsB: 0,
-                  hpA: 100, hpB: 100, units: [], marks: [], coins: [], feed: [] };
-  const LANES = [-26, 0, 26];           // 3 fileiras na estrada
-  const SPEED = 16;                      // px/s: marcha lenta, cinematográfica
-  const MAX_UNITS = 60;
+                  units: [], marks: [], coins: [], sparks: [], birds: [], clouds: [],
+                  shots: [], corpses: [], balloons: [], feed: [], shakeA: 0, shakeB: 0,
+                  celebrating: null, confettiAcc: 0, partyAcc: 0,
+                  weather: { mode: "limpo", timer: 70 } };
+  const LANES = [-26, 0, 26];
+  const SPEED = 16;                      // marcha lenta, cinematográfica
+  const MAX_UNITS = 60, MAX_SPARKS = 40, MAX_SHOTS = 12, MAX_CORPSES = 40;
+  const RANGE = { guerreiro: 12, arqueiro: 90, mago: 130 };  // alcance real por classe
+  const SHOT_V = { arqueiro: 220, mago: 140 };
 
   function resize() {
     W = canvas.width = innerWidth; H = canvas.height = innerHeight;
     bg = document.createElement("canvas"); bg.width = W; bg.height = H;
     paintBackground(bg.getContext("2d"));
+    seedClouds();
   }
   addEventListener("resize", resize);
 
-  // determinístico: mesmo campo todo frame, sem custo
-  function hash(x, y) { let h = x * 374761393 + y * 668265263; h ^= h >> 13; return ((h * 1274126177) >> 16) & 7; }
+  function hash(x, y) { let h = x * 374761393 + y * 668265263; h ^= h >> 13; return ((h * 1274126177) >> 16) & 255; }
+  const roadY = () => H / 2, castleX = side => side === "A" ? 70 : W - 70;
+  const onRoad = (x, y) => Math.abs(y - roadY()) < 70 || Math.abs(x - castleX("A")) < 90 || Math.abs(x - castleX("B")) < 90;
+
+  // ===== mapa rico, pré-renderizado 1x (custo zero por frame) =====
+  function pine(g, x, y, s) {
+    g.fillStyle = COL.wood; g.fillRect(x - 2, y - 6 * s, 4, 6 * s);
+    g.fillStyle = COL.leafD;
+    for (let i = 0; i < 3; i++) { const w = (3 - i) * 6 * s; g.fillRect(x - w / 2, y - (i + 2) * 6 * s, w, 6 * s); }
+    g.fillStyle = COL.leaf; g.fillRect(x - 9 * s, y - 20 * s, 5 * s, 4 * s);
+  }
+  function bush(g, x, y) { g.fillStyle = COL.leaf; g.fillRect(x, y, 12, 8); g.fillStyle = COL.leafD; g.fillRect(x + 2, y + 4, 8, 4); }
+  function rock(g, x, y) { g.fillStyle = COL.rock; g.fillRect(x, y + 4, 14, 8); g.fillStyle = COL.stone; g.fillRect(x + 2, y, 9, 6); }
+  function flowers(g, x, y, h) { const cols = ["#f472b6", "#facc15", "#e2e8f0"]; for (let i = 0; i < 3; i++) { g.fillStyle = cols[(h + i) % 3]; g.fillRect(x + i * 6, y + (h % 5), 3, 5); } }
 
   function paintBackground(g) {
     const T = 24;
     for (let y = 0; y < H; y += T) for (let x = 0; x < W; x += T) {
       g.fillStyle = ((x + y) / T) % 2 ? COL.grass1 : COL.grass2;
       g.fillRect(x, y, T, T);
-      if (hash(x, y) === 0) { g.fillStyle = COL.grass2; g.fillRect(x + 6, y + 10, 4, 4); }
+      if (hash(x, y) % 9 === 0) { g.fillStyle = COL.grass2; g.fillRect(x + 6, y + 10, 4, 4); }
     }
-    const ry = H / 2;  // estrada de terra
+    // lago
+    const lx = W * 0.5, ly = H * 0.16;
+    g.fillStyle = COL.stoneD;
+    g.beginPath(); g.ellipse(lx, ly, 130, 44, 0, 0, 7); g.fill();
+    g.fillStyle = COL.water;
+    g.beginPath(); g.ellipse(lx, ly, 118, 36, 0, 0, 7); g.fill();
+    // estrada
+    const ry = roadY();
     g.fillStyle = COL.roadD; g.fillRect(0, ry - 52, W, 104);
     g.fillStyle = COL.road; g.fillRect(0, ry - 44, W, 88);
     for (let x = 0; x < W; x += 32) { g.fillStyle = COL.roadD; g.fillRect(x, ry - 3, 14, 6); }
+    // vegetação e pedras fora da estrada (determinístico)
+    for (let i = 0; i < 90; i++) {
+      const x = hash(i, 7) * W / 256, y = hash(i, 13) * H / 256, h = hash(i, 29);
+      if (onRoad(x, y) || Math.hypot(x - lx, y - ly) < 150) continue;
+      if (h % 5 === 0) pine(g, x, y, 1 + (h % 2) * 0.5);
+      else if (h % 5 === 1) bush(g, x, y);
+      else if (h % 5 === 2) rock(g, x, y);
+      else if (h % 5 === 3) flowers(g, x, y, h);
+    }
   }
 
-  function castleX(side) { return side === "A" ? 70 : W - 70; }
+  function seedClouds() {
+    world.clouds = [];
+    for (let i = 0; i < 4; i++) world.clouds.push({ x: hash(i, 3) * W / 256, y: 24 + hash(i, 5) % 110,
+      v: 5 + hash(i, 17) % 6, img: makeCloud(i % 3) });
+  }
 
-  // castelo procedural em grade: torres + ameias + portão + bandeira 2 frames
+  // nuvem pixelada de verdade: pré-renderizada 1x, deriva no céu + sombra suave
+  function makeCloud(variant) {
+    const c = document.createElement("canvas"); c.width = 132; c.height = 44;
+    const g = c.getContext("2d");
+    const blobs = variant === 0 ? [[10, 18, 60, 18], [40, 8, 60, 22], [90, 20, 34, 14]]
+      : variant === 1 ? [[6, 22, 44, 14], [40, 10, 56, 24], [88, 18, 38, 16]]
+      : [[20, 20, 50, 16], [58, 6, 44, 26], [96, 22, 28, 12]];
+    g.fillStyle = "#c9d4de";
+    for (const [x, y, w, h] of blobs) g.fillRect(x, y + 5, w, h);          // sombra da nuvem
+    g.fillStyle = "#f2f6fa";
+    for (const [x, y, w, h] of blobs) g.fillRect(x, y, w, h);              // corpo branco
+    g.fillStyle = "#ffffff";
+    for (const [x, y, w] of blobs.map(b => [b[0] + 4, b[1], b[2] - 8])) g.fillRect(x, y, Math.max(4, w), 5); // brilho
+    return c;
+  }
+
+  // ===== castelo + tochas =====
   function drawCastle(g, side, frame) {
-    const cx = castleX(side), base = H / 2 + 60, c = side === "A" ? COL.A : COL.B;
+    let cx = castleX(side);
+    const sh = side === "A" ? world.shakeA : world.shakeB;   // tremor ao ser atingido
+    if (sh > 0) cx += (frame % 2 ? 3 : -3);
+    const base = roadY() + 60, c = side === "A" ? COL.A : COL.B;
     const put = (dx, dy, w, h, col) => { g.fillStyle = col; g.fillRect(cx + dx, base + dy, w, h); };
-    put(-44, -120, 88, 120, COL.stone);                       // corpo
-    for (let i = 0; i < 4; i++) { put(-44 + i * 24, -134, 14, 14, COL.stone); }  // ameias
-    put(-58, -150, 26, 150, COL.stoneD); put(32, -150, 26, 150, COL.stoneD);     // torres
+    put(-44, -120, 88, 120, COL.stone);
+    for (let i = 0; i < 4; i++) put(-44 + i * 24, -134, 14, 14, COL.stone);
+    put(-58, -150, 26, 150, COL.stoneD); put(32, -150, 26, 150, COL.stoneD);
     for (let i = 0; i < 2; i++) { put(-58 + i * 14, -162, 8, 12, COL.stoneD); put(32 + i * 14, -162, 8, 12, COL.stoneD); }
-    put(-14, -46, 28, 46, "#222");                                // portão
-    put(-30, -100, 12, 12, "#222"); put(18, -100, 12, 12, "#222"); // janelas
-    put(-2, -186, 4, 52, COL.wood);                               // mastro
-    const wave = frame % 2 ? 6 : 0;
-    put(2, -186, 30, 18, c); put(2 + 24 - wave, -186, 6, 18, c);  // bandeira
-    return { x: cx, y: base - 60 };
+    put(-14, -46, 28, 46, "#222"); put(-30, -100, 12, 12, "#222"); put(18, -100, 12, 12, "#222");
+    put(-2, -186, 4, 52, COL.wood);
+    const torn = (side === "A" ? world.hpA : world.hpB) < 25;  // bandeira rasgada perto da queda
+    if (torn) { put(2, -186, 18, 18, c); }
+    else put(2, -186, 30, 18, c), put(2 + 24 - (frame % 2 ? 6 : 0), -186, 6, 18, c);
+    for (const tx of [-52, 52]) {  // tochas laterais, chama 3 frames
+      put(tx - 2, -70, 4, 26, COL.wood);
+      g.fillStyle = COL.flame[frame % 3]; g.fillRect(cx + tx - 3, -84 - (frame % 3) * 2, 6, 10);
+      g.fillStyle = COL.flame[(frame + 1) % 3]; g.fillRect(cx + tx - 1, -80, 2, 5);
+    }
   }
 
-  // soldadinho 8x12: elmo + corpo da facção + pernas que alternam (2 frames)
+  // corpo caído permanente: deitado + elmo ao lado + olhinhos X
+  function drawCorpse(g, cp) {
+    const d = cp.side === "A" ? COL.Ad : COL.Bd;
+    g.fillStyle = cp.kind === "mago" ? "#7c3aed" : d;
+    g.fillRect(cp.x - 7, cp.y - 8, 14, 6);                       // corpo deitado
+    g.fillStyle = COL.skin; g.fillRect(cp.x + 7, cp.y - 8, 5, 5); // cabeça
+    g.fillStyle = "#111";                                         // X nos olhos
+    g.fillRect(cp.x + 7, cp.y - 8, 2, 2); g.fillRect(cp.x + 10, cp.y - 5, 2, 2);
+  }
+
+  const SKINS = ["#f1c27d", "#e0ac69", "#c68642", "#8d5524"];  // tons de pele variados
+  const skinOf = u => SKINS[(u.skin || 0) % SKINS.length];
+
+  // ===== personagens detalhados: cada classe tem silhueta própria =====
   function drawSoldier(g, u) {
     const c = u.side === "A" ? COL.A : COL.B, d = u.side === "A" ? COL.Ad : COL.Bd;
-    const x = Math.round(u.x), y = Math.round(u.y), leg = u.frame % 2 ? 2 : -2;
-    g.fillStyle = COL.skin; g.fillRect(x - 3, y - 30, 6, 6);       // rosto
-    g.fillStyle = d; g.fillRect(x - 4, y - 34, 8, 5);              // elmo
-    g.fillStyle = c; g.fillRect(x - 4, y - 24, 8, 12);             // corpo
-    g.fillStyle = "#222"; g.fillRect(x - 4, y - 12, 3, 8 + leg); g.fillRect(x + 1, y - 12, 3, 8 - leg); // pernas
-    const dir = u.side === "A" ? 1 : -1;                          // arma aponta p/ frente
-    if (u.kind === 0) { g.fillStyle = "#ddd"; g.fillRect(x + dir * 5, y - 26, 2, 12); }       // espada
-    else if (u.kind === 1) { g.fillStyle = COL.wood; g.fillRect(x + dir * 5, y - 28, 2, 14); }// arco
-    else { g.fillStyle = COL.wood; g.fillRect(x + dir * 4, y - 30, 2, 18); }                  // lança
+    const lunge = u.lunge > 0 ? (u.side === "A" ? 6 : -6) : 0;   // investida
+    const x = Math.round(u.x) + lunge, y0 = Math.round(u.y), f = u.frame % 4;
+    const hop = u.cheer ? -Math.abs(Math.sin(performance.now() / 150 + u.x)) * 9 : 0;  // pulo de festa
+    const y = y0 + Math.round(hop);
+    const bob = f === 1 ? -1 : f === 3 ? 1 : 0, leg = f < 2 ? 2 : -2;
+    const dir = u.side === "A" ? 1 : -1, sway = f === 2 ? 2 : 0, sk = skinOf(u);
+    // botas
+    g.fillStyle = "#3b2a1a"; g.fillRect(x - 4, y - 6, 3, 6 + (leg > 0 ? 2 : 0)); g.fillRect(x + 1, y - 6, 3, 6 + (leg < 0 ? 2 : 0));
+    if (u.kind === "mago") {
+      g.fillStyle = "#7c3aed"; g.fillRect(x - 4, y - 24 + bob, 8, 18);   // manto longo roxo
+      g.fillStyle = c; g.fillRect(x - 4, y - 18 + bob, 8, 3);            // faixa da facção
+      g.fillStyle = "#ddd"; g.fillRect(x - 2, y - 22 + bob, 4, 6);       // barba grisalha
+      g.fillStyle = sk; g.fillRect(x - 2, y - 28 + bob, 4, 4);           // rosto
+      g.fillStyle = "#4c1d95";                                          // chapéu + aba + ponta
+      g.fillRect(x - 5, y - 34 + bob, 10, 7); g.fillRect(x - 6, y - 29 + bob, 12, 2);
+      g.fillRect(x + 2, y - 38 + bob, 4, 5);
+      g.fillStyle = COL.wood; g.fillRect(x + dir * 5, y - 32 + bob, 2, 20); // cajado
+      const orb = 3 + (f % 2);                                          // orbe pulsante
+      g.fillStyle = "#22d3ee"; g.fillRect(x + dir * 5 - 1, y - 36 + bob, orb + 1, orb + 1);
+    } else if (u.kind === "arqueiro") {
+      g.fillStyle = "#4a5d23"; g.fillRect(x - 4, y - 24 + bob, 8, 12);   // túnica verde
+      g.fillStyle = "#3a4a1c"; g.fillRect(x - 5, y - 34 + bob, 10, 6);   // capuz
+      g.fillStyle = "#3a4a1c"; g.fillRect(x - 2, y - 38 + bob, 4, 5);    // ponta do capuz
+      g.fillStyle = sk; g.fillRect(x - 2, y - 29 + bob, 4, 5);           // rosto na sombra
+      g.fillStyle = COL.wood; g.fillRect(x - dir * 6, y - 28 + bob, 2, 14); // aljava nas costas
+      g.fillStyle = "#ddd";
+      g.fillRect(x - dir * 6, y - 31 + bob, 2, 3); g.fillRect(x - dir * 6, y - 28 + bob, 2, 2); // flechas
+      g.fillStyle = COL.wood; g.fillRect(x + dir * 5, y - 30 + sway + bob, 2, 16); // arco
+      g.fillStyle = "#eee"; g.fillRect(x + dir * 6, y - 30 + sway + bob, 1, 16);   // corda
+    } else {  // guerreiro
+      g.fillStyle = sk; g.fillRect(x - 3, y - 30 + bob, 6, 6);           // rosto
+      g.fillStyle = d; g.fillRect(x - 4, y - 34 + bob, 8, 5);            // elmo
+      g.fillStyle = "#fff"; g.fillRect(x - 1, y - 38 + bob, 2, 5);       // pluma
+      g.fillStyle = c; g.fillRect(x - 4, y - 24 + bob, 8, 12);           // corpo
+      g.fillStyle = d; g.fillRect(x - 6, y - 24 + bob, 2, 5); g.fillRect(x + 4, y - 24 + bob, 2, 5); // ombreiras
+      g.fillStyle = COL.wood; g.fillRect(x - dir * 7, y - 26 + bob, 2, 12); // escudo nas costas
+      g.fillStyle = c; g.fillRect(x - dir * 8, y - 23 + bob, 4, 4);      // brasão
+      g.fillStyle = "#ddd"; g.fillRect(x + dir * 5, y - 26 + sway + bob, 2, 12); // espada
+    }
+    g.fillStyle = "#222"; g.fillRect(x - 4, y - 12, 3, 8 + leg); g.fillRect(x + 1, y - 12, 3, 8 - leg);
+    if (u.lunge > 0) {  // arco de corte no golpe
+      g.fillStyle = "#fff";
+      g.fillRect(x + dir * 6, y - 30 + bob, 3, 16); g.fillRect(x + dir * 9, y - 27 + bob, 3, 10);
+    }
+    if (u.aim > 0) { g.fillStyle = u.kind === "mago" ? "#22d3ee" : "#ddd"; g.fillRect(x - 1, y - 38 + bob, 2, 4); }  // mira
   }
 
   function bar(g, x, y, w, h, frac, col) {
@@ -102,95 +243,388 @@
   }
 
   function feed(text) {
-    const t = world.tick;
-    const mm = String(Math.floor(t / 60)).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
+    const t = world.tick, mm = String(Math.floor(t / 60)).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
     world.feed.unshift(`[${mm}:${ss}] ${text}`);
-    if (world.feed.length > 8) world.feed.pop();
+    if (world.feed.length > 5) world.feed.pop();
   }
 
-  // ===== eventos do backend viram entidades =====
-  function onSpawn(side) {
+  // ===== clima cosmético (nunca toca em marcha/HP) =====
+  const WEATHERS = ["limpo", "chuva", "nevoeiro"];
+  function updateWeather(dt) {
+    const w = world.weather;
+    w.timer -= dt;
+    if (w.timer <= 0) {
+      const next = WEATHERS[(WEATHERS.indexOf(w.mode) + 1 + (hash(world.tick, 77) % 2)) % 3];
+      w.mode = next; w.timer = 60 + (hash(world.tick, 91) % 30);
+      feed(next === "chuva" ? "🌧 chuva sobre o campo" : next === "nevoeiro" ? "🌫 nevoeiro desce" : "☀ céu limpo");
+    }
+  }
+  function drawWeather() {
+    const w = world.weather.mode, now = performance.now();
+    if (w === "chuva") {
+      ctx.fillStyle = "rgba(12,18,44,.30)"; ctx.fillRect(0, 0, W, H);   // céu pesado
+      ctx.fillStyle = "rgba(150,180,220,.55)";
+      for (let i = 0; i < 90; i++) {  // risco inclinado + respingo no chão
+        const x = (hash(i, 41) * 13 + now / 28) % (W + 40) - 20, y = (hash(i, 43) * 17 + now / 9) % H;
+        ctx.fillRect(x, y, 2, 11); ctx.fillRect(x - 3, y, 2, 11);
+        if ((i + ((now / 300) | 0)) % 3 === 0) ctx.fillRect(x - 2, y + 12, 6, 2);  // splash
+      }
+      if (hash((now / 7000) | 0, 5) % 9 === 0) { ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.fillRect(0, 0, W, H); }  // relâmpago
+    } else if (w === "nevoeiro") {
+      const bands = [[.16, .10, 46, .25], [.38, .14, 30, .55], [.62, .12, 60, .78]];  // 3 camadas
+      for (const [fy, fa, sp, ph] of bands) {
+        ctx.fillStyle = `rgba(185,195,205,${fa})`;
+        const off = (now / sp + ph * W) % (W + 500);
+        ctx.fillRect(W - off, H * fy, 500, 80);
+        ctx.fillRect(off - 500, H * fy + 46, 500, 60);
+      }
+    }
+  }
+
+  // ===== grunhidos da tropa (balõezinhos) =====
+  const GRUNT_SPAWN = ["Pelo rei!", "Bora!", "De novo??", "Cerveja depois!", "Pra guerra!"];
+  const GRUNT_DEATH = ["Ai!", "Minha perna!", "Diz pra minha mãe...", "Que rude!", "Au."];
+  const GRUNT_SIEGE = ["PELO REI!!!", "ABRE O PORTÃO!", "É HOJE!"];
+  const GRUNT_IDLE = ["que marcha longa...", "tô com fome", "canta aí", "meu pé...", "falta muito?", "psst... viu meu escudo?"];
+  const GRUNT_RAIN = ["tô encharcado!", "minha corda molhou...", "chuva e guerra, ótimo", "escorreguei!", "que lama!"];
+  const GRUNT_FOG = ["não vejo nada...", "cadê o inimigo?", "que névoa é essa?", "tô cego!", "ouvi um passo..."];
+  const GRUNT_THREAT = ["Vem!", "Te pego!", "Corre que dá tempo!", "Hoje tem!", "Passa não!", "Vou te amassar!", "É você que eu quero!"];
+  const GRUNT_THANKS = ["Valeu!", "Obrigado!", "Aêê!", "Ouro!!", "Tamo junto!", "É nóis!"];
+  const GRUNT_PARTY = ["OBRIGADO!", "VALEU, DOADOR!", "TE AMO!", "É NOIS!", "FESTA!", "CHURRASCO!"];
+  // falas mudam com o clima: chuva/nevoeiro têm repertório próprio
+  const idleLines = () => world.weather.mode === "chuva" ? GRUNT_RAIN
+    : world.weather.mode === "nevoeiro" ? GRUNT_FOG : GRUNT_IDLE;
+  const pick = a => a[hash(world.tick, world.units.length + a.length) % a.length];
+
+  // ===== nomes brasileiros: cada soldado ganha identidade =====
+  const NAMES = ["Zé", "Tonho", "Chico", "Maria", "João", "Cleitinho", "Valdir", "Jurandir",
+    "Cleusa", "Raimundo", "Miguel", "Dito", "Nenzinho", "Beto", "Tião", "Geraldo", "Nazaré",
+    "Odete", "Doralice", "Severino", "Lurdes", "Nelson", "Creuza", "Ademar", "Iolanda", "Pelé",
+    "Tarcísio", "Rosinha", "Edivaldo", "Marlene", "Jovelino", "Cidinha"];
+  function dealName() {
+    const taken = new Set(world.units.map(u => u.name));
+    const free = NAMES.filter(n => !taken.has(n));
+    const pool = free.length ? free : NAMES;  // esgotou: repete (guerra grande)
+    return pool[hash(world.tick, world.spawnedA * 3 + world.spawnedB * 5 + pool.length) % pool.length];
+  }
+
+  function say(u, text) {
+    if (world.balloons.length >= 6) world.balloons.shift();
+    world.balloons.push({ u, text, life: 2.2 });
+  }
+
+  function drawBalloons() {
+    ctx.font = "11px monospace";
+    for (const b of world.balloons) {
+      const w = ctx.measureText(b.text).width + 12;
+      const x = Math.round(b.u.x - w / 2), y = Math.round(b.u.y - 68);
+      ctx.globalAlpha = Math.min(1, b.life);
+      ctx.fillStyle = "#fff"; ctx.fillRect(x, y, w, 18);
+      ctx.fillStyle = "#111"; ctx.fillRect(x, y + 18, 8, 5);  // rabinho
+      ctx.fillStyle = "#111"; ctx.fillText(b.text, x + 6, y + 13);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // plaquinha com o nome, sempre acima do soldado
+  function drawNames() {
+    ctx.font = "10px monospace";
+    for (const u of world.units) {
+      const w = ctx.measureText(u.name).width + 8;
+      const x = Math.round(u.x - w / 2), y = Math.round(u.y - 46);
+      ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(x, y, w, 14);
+      ctx.fillStyle = u.side === "A" ? "#9ec5ff" : "#ffa3a3";
+      ctx.fillText(u.name, x + 4, y + 11);
+    }
+  }
+
+  // ===== tríade: guerreiro > arqueiro > mago > guerreiro (ninguém absoluto) =====
+  const KINDS = ["guerreiro", "arqueiro", "mago"];
+  const BEATS = { guerreiro: "arqueiro", arqueiro: "mago", mago: "guerreiro" };
+  const rndKind = () => KINDS[hash(world.tick, world.spawnedA + world.spawnedB * 7) % 3];
+
+  // ===== eventos do backend =====
+  function onSpawn(side, kind) {
     if (world.units.length >= MAX_UNITS) return;
     const n = side === "A" ? world.spawnedA++ : world.spawnedB++;
-    world.units.push({ side, kind: n % 3, x: castleX(side) + (side === "A" ? 50 : -50),
-                       y: H / 2 + LANES[n % 3], frame: 0, acc: 0 });
+    kind = KINDS.includes(kind) ? kind : rndKind();
+    const u = { side, kind, name: dealName(), tauntCd: 3 + (n % 4),
+                skin: hash(n, side === "A" ? 1 : 2) % SKINS.length,
+                x: castleX(side) + (side === "A" ? 50 : -50),
+                y: roadY() + LANES[n % 3], frame: n % 4, acc: 0 };
+    world.units.push(u);
+    say(u, n % 3 === 0 ? pick(idleLines()) : pick(GRUNT_SPAWN));  // 1/3 já comenta o clima
+  }
+  function onHit(side) {  // backend confirmou dano: treme o castelo atingido
+    if (side === "A") world.shakeB = 0.35; else world.shakeA = 0.35;
+    const tx = castleX(side === "A" ? "B" : "A");
+    world.marks.push({ x: tx, y: roadY() - 40, life: 1.4, big: true });
+    for (let k = 0; k < 8 && world.sparks.length < MAX_SPARKS; k++)  // escombros do portão
+      world.sparks.push({ x: tx - 14 + k * 4, y: roadY() + 20, vx: (k % 3 - 1) * 25, vy: -40 - (k % 4) * 15, life: 1 });
+  }
+
+  function nearestFoe(u, reach) {
+    let best = null, bd = reach;
+    for (const v of world.units) {
+      if (v.side === u.side || Math.abs(v.y - u.y) >= 14) continue;
+      const ahead = (u.side === "A" ? v.x - u.x : u.x - v.x);
+      if (ahead > 0 && ahead < bd) { bd = ahead; best = v; }
+    }
+    return best;
+  }
+
+  function toCorpse(d) {
+    world.corpses.push({ x: Math.round(d.x), y: Math.round(d.y), side: d.side, kind: d.kind });
+    while (world.corpses.length > MAX_CORPSES) world.corpses.shift();  // vira campo antigo
+  }
+
+  // duelo da tríade: vencedor sobrevive, empate mata os dois; morto vira corpo permanente
+  function duel(a, b) {
+    if (!world.units.includes(a) || !world.units.includes(b)) return;
+    let dead = [a, b], winner = null;
+    if (BEATS[a.kind] === b.kind) { dead = [b]; winner = a; }
+    else if (BEATS[b.kind] === a.kind) { dead = [a]; winner = b; }
+    for (const d of dead) { world.units.splice(world.units.indexOf(d), 1); toCorpse(d); }
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    world.marks.push({ x: mx, y: my, life: 1.4, big: true });
+    const seed = Math.round(mx + my);
+    for (let k = 0; k < 12 && world.sparks.length < MAX_SPARKS; k++)
+      world.sparks.push({ x: mx, y: my, vx: (hash(k, seed) % 90) - 45, vy: -30 - (hash(k, seed + 1) % 60), life: 1 });
+    if (world.balloons.length < 6)
+      world.balloons.push({ u: { x: mx, y: my }, text: pick(GRUNT_DEATH), life: 1.6, fixed: true });
+    if (winner) {
+      if (winner.side === "A") world.killsA++; else world.killsB++;
+      feed(`⚔ ${winner.kind} ${winner.side} vence ${dead[0].kind} ${dead[0].side}!`);
+    } else {
+      feed(`💥 ${a.kind} × ${b.kind}: empate brutal!`);
+    }
   }
 
   function update(dt) {
-    for (const u of world.units) { u.x += (u.side === "A" ? 1 : -1) * SPEED * dt; u.acc += dt; if (u.acc > 0.28) { u.acc = 0; u.frame++; } }
-    // encontros: inimigos que se cruzam na mesma fileira lutam
+    updateWeather(dt);
+    for (const cl of world.clouds) { cl.x += cl.v * dt; if (cl.x > W + 140) cl.x = -140; }  // deriva
+    if (hash(world.tick, 55) % 47 === 0 && world.birds.length < 3)
+      world.birds.push({ x: -20, y: 60 + hash(world.tick, 59) % (H / 3), v: 60, f: 0 });
+    for (const b of world.birds) { b.x += b.v * dt; b.f += dt; }
+    world.birds = world.birds.filter(b => b.x < W + 20);
+    for (const u of world.units) {
+      if (!u.hold) u.x += (u.side === "A" ? 1 : -1) * SPEED * dt;
+      u.acc += dt; if (u.acc > 0.22) { u.acc = 0; u.frame++; }
+      u.lunge = Math.max(0, (u.lunge || 0) - dt);
+      u.cd = Math.max(0, (u.cd || 0) - dt);
+    }
+    // arqueiro/mago: param e atiram à distância; guerreiro: corpo a corpo
+    for (const u of world.units) {
+      const reach = RANGE[u.kind] || 12;
+      u.hold = false;
+      if (reach > 12) {
+        const foe = nearestFoe(u, reach);
+        if (foe) {
+          u.hold = true;
+          if (!u.cd && world.shots.length < MAX_SHOTS) {
+            u.cd = 1.6; u.aim = 0.3;
+            const dir = u.side === "A" ? 1 : -1;
+            world.shots.push({ x: u.x + dir * 6, y: u.y - 24, vx: dir * SHOT_V[u.kind],
+                               from: u, to: foe, kind: u.kind });
+          }
+        }
+      }
+      u.aim = Math.max(0, (u.aim || 0) - dt);
+    }
+    // projéteis: chegando perto, duelam; alvo sumiu, fizzle
+    for (let i = world.shots.length - 1; i >= 0; i--) {
+      const s = world.shots[i];
+      s.x += s.vx * dt;
+      if (!world.units.includes(s.to) || !world.units.includes(s.from)) { world.shots.splice(i, 1); continue; }
+      if (Math.abs(s.x - s.to.x) < 8 && Math.abs(s.y - s.to.y) < 30) {
+        world.shots.splice(i, 1);
+        duel(s.from, s.to);
+      } else if (s.x < -20 || s.x > W + 20) world.shots.splice(i, 1);
+    }
+    // contato: duelo imediato (qualquer classe)
     for (let i = world.units.length - 1; i >= 0; i--) for (let j = i - 1; j >= 0; j--) {
       const a = world.units[i], b = world.units[j];
       if (a.side !== b.side && Math.abs(a.y - b.y) < 14 && Math.abs(a.x - b.x) < 10) {
-        world.units.splice(i, 1); world.units.splice(j, 1);
-        world.marks.push({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, life: 1 });
-        if (a.side === "A") world.killsA++; else world.killsB++;
+        a.lunge = b.lunge = 0.15;   // investida: 1 frame de avanço + corte
+        duel(a, b);
         break;
       }
     }
-    // cerco: chegou ao castelo inimigo
+    // chegada visual ao castelo (HP real vem do backend via hit/state)
     for (let i = world.units.length - 1; i >= 0; i--) {
       const u = world.units[i], target = castleX(u.side === "A" ? "B" : "A");
       if ((u.side === "A" && u.x >= target - 50) || (u.side === "B" && u.x <= target + 50)) {
         world.units.splice(i, 1);
-        if (u.side === "A") world.hpB = Math.max(0, world.hpB - 2); else world.hpA = Math.max(0, world.hpA - 2);
-        world.marks.push({ x: target, y: H / 2 - 40, life: 1 });
+        if (world.balloons.length < 6) world.balloons.push({ u: { x: target, y: roadY() - 70 }, text: pick(GRUNT_SIEGE), life: 1.8, fixed: true });
       }
     }
-    world.hpA = Math.min(100, world.hpA + dt * 0.4); world.hpB = Math.min(100, world.hpB + dt * 0.4); // regen
+    // tagarelice da marcha (repertório do clima) + ameaças ao avistar inimigo
+    if (world.units.length && hash(world.tick, Math.floor(performance.now() / 4000)) % 5 === 0) {
+      const u = world.units[hash(world.tick, 61) % world.units.length];
+      if (!world.balloons.some(b => b.u === u)) say(u, pick(idleLines()));
+    }
+    for (const u of world.units) {
+      u.tauntCd = Math.max(0, (u.tauntCd || 0) - dt);
+      if (u.tauntCd > 0 || world.balloons.some(b => b.u === u)) continue;
+      const foe = nearestFoe(u, 150);   // avistou: provoca!
+      if (foe) { u.tauntCd = 7; say(u, pick(GRUNT_THREAT)); }
+    }
+    world.shakeA = Math.max(0, world.shakeA - dt); world.shakeB = Math.max(0, world.shakeB - dt);
+    if (world.celebrating) {  // festa da vitória: confete + gratidão
+      const cc = world.celebrating === "A" ? COL.A : COL.B;
+      const cx = castleX(world.celebrating);
+      world.confettiAcc += dt;
+      while (world.confettiAcc > 0.12 && world.sparks.length < MAX_SPARKS) {
+        world.confettiAcc -= 0.12;
+        world.sparks.push({ x: cx - 60 + hash(world.tick, world.sparks.length * 7) % 120,
+          y: roadY() - 200, vx: (hash(world.tick, world.sparks.length) % 40) - 20,
+          vy: 30, life: 2.2, col: world.sparks.length % 3 ? cc : COL.gold });
+      }
+      world.partyAcc += dt;
+      if (world.partyAcc > 2 && world.balloons.length < 6) {
+        world.partyAcc = 0;
+        const fans = world.units.filter(u => u.side === world.celebrating);
+        const u = fans.length ? fans[hash(world.tick, fans.length) % fans.length] : null;
+        const spot = u || { x: cx, y: roadY() - 60 };
+        const b = { u: spot, text: pick(GRUNT_PARTY), life: 2.2 };
+        if (!u) b.fixed = true;
+        world.balloons.push(b);
+      }
+    }
+    for (const bl of world.balloons) bl.life -= dt;   // balão segue a unidade; morre sozinho
+    world.balloons = world.balloons.filter(bl => bl.life > 0 && (bl.fixed || world.units.includes(bl.u)));
     for (const m of world.marks) m.life -= dt * 0.8;
     world.marks = world.marks.filter(m => m.life > 0);
+    for (const s of world.sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 60 * dt; s.life -= dt * 1.4; }
+    world.sparks = world.sparks.filter(s => s.life > 0);
     for (const c of world.coins) { c.y -= dt * 30; c.life -= dt; }
     world.coins = world.coins.filter(c => c.life > 0);
   }
 
+  // rachaduras (4 tiers), fumaça e poeira conforme o HP real do backend
+  function damageFx(g, side, frame) {
+    const hp = side === "A" ? world.hpA : world.hpB;
+    const cx = castleX(side), base = roadY() + 60;
+    if (hp >= 100) return;
+    g.fillStyle = "#222";
+    if (hp < 75) { g.fillRect(cx - 20, base - 90, 4, 30); g.fillRect(cx - 20, base - 70, 14, 4); }   // trinca 1
+    if (hp < 50) { g.fillRect(cx + 12, base - 110, 4, 40); g.fillRect(cx + 2, base - 90, 14, 4); }   // trinca 2
+    if (hp < 25) { g.fillRect(cx - 4, base - 120, 4, 24); g.fillStyle = "rgba(120,100,80,.8)";       // trinca 3 + poeira
+      for (let i = 0; i < 5; i++) g.fillRect(cx - 30 + i * 14, base - 150 - ((frame + i * 2) % 4) * 6, 7, 7); }
+    if (hp < 33) {
+      g.fillStyle = "rgba(90,90,90,.7)";                                            // fumaça
+      const t = (frame + (side === "A" ? 0 : 2)) % 4;
+      g.fillRect(cx - 10 + t * 3, base - 170 - t * 8, 12, 12);
+    }
+  }
+
   function render(frame) {
     ctx.drawImage(bg, 0, 0);
+    for (const cl of world.clouds) {  // nuvem no céu + sombrinha no chão
+      ctx.drawImage(cl.img, Math.round(cl.x), Math.round(cl.y));
+      ctx.fillStyle = "rgba(0,0,0,.10)";
+      ctx.beginPath(); ctx.ellipse(cl.x + 66, cl.y + 260, 70, 18, 0, 0, 7); ctx.fill();
+    }
+    const lx = W * 0.5, ly = H * 0.16;   // brilho do lago (2 frames)
+    ctx.fillStyle = COL.waterL;
+    ctx.beginPath(); ctx.ellipse(lx + (frame % 2 ? 8 : -8), ly, 46, 8, 0, 0, 7); ctx.fill();
     drawCastle(ctx, "A", frame); drawCastle(ctx, "B", frame);
+    damageFx(ctx, "A", frame); damageFx(ctx, "B", frame);
+    for (const cp of world.corpses) drawCorpse(ctx, cp);   // caídos permanentes
     for (const u of world.units) drawSoldier(ctx, u);
+    drawNames();
+    for (const s of world.shots) {  // flechas e virolas em voo
+      if (s.kind === "mago") { ctx.fillStyle = "#22d3ee"; ctx.fillRect(s.x - 2, s.y - 2, 5, 5); }
+      else { ctx.fillStyle = "#d6a85c"; ctx.fillRect(s.x - 4, s.y - 1, 8, 2); }
+    }
+    drawBalloons();
+    ctx.fillStyle = "#111";              // pássaros
+    for (const b of world.birds) { const w = b.f % 0.6 < 0.3 ? 6 : 2; ctx.fillRect(b.x - w, b.y, w * 2, 2); }
     ctx.fillStyle = "#fff";
-    for (const m of world.marks) {  // clarão + ✕ do combate
-      ctx.globalAlpha = Math.max(0, m.life);
-      const s = 6 + (1 - m.life) * 22;
+    for (const m of world.marks) {
+      ctx.globalAlpha = Math.max(0, Math.min(1, m.life));
+      const s = (m.big ? 14 : 6) + Math.max(0, 1 - m.life) * 22;
       ctx.fillRect(m.x - s / 2, m.y - 2, s, 4); ctx.fillRect(m.x - 2, m.y - s / 2, 4, s);
       ctx.globalAlpha = 1;
     }
     ctx.fillStyle = COL.gold;
-    for (const c of world.coins) { ctx.globalAlpha = Math.max(0, c.life); ctx.fillRect(c.x, c.y, 4, 4); }
+    for (const s of world.sparks) { ctx.globalAlpha = Math.max(0, Math.min(1, s.life)); ctx.fillStyle = s.col || COL.gold; ctx.fillRect(s.x, s.y, 3, 3); }
+    for (const c of world.coins) { ctx.fillRect(c.x, c.y, 4, 4); }
     ctx.globalAlpha = 1;
-    hud(frame);
+    drawWeather();
+    hud();
   }
 
-  function hud(frame) {
+  // ===== HUD minimalista =====
+  function hud() {
     ctx.font = "13px monospace";
     const t = world.tick, hh = String(Math.floor(t / 3600)).padStart(2, "0"),
           mm = String(Math.floor(t / 60) % 60).padStart(2, "0"), ss = String(t % 60).padStart(2, "0");
-    ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(10, 10, 330, 66);   // placar campanha
-    ctx.fillStyle = "#fff";
-    ctx.fillText(`CAMPANHA ${hh}:${mm}:${ss}  tick ${t}`, 18, 30);
-    ctx.fillStyle = COL.A; ctx.fillText(`A ❚ sold ${world.spawnedA} kills ${world.killsA}`, 18, 50);
-    ctx.fillStyle = COL.B; ctx.fillText(`B ❚ sold ${world.spawnedB} kills ${world.killsB}`, 18, 68);
-    for (const side of ["A", "B"]) {  // tesouraria + HP sobre os castelos
-      const cx = castleX(side), gold = side === "A" ? world.goldA : world.goldB,
-            hp = side === "A" ? world.hpA : world.hpB;
-      bar(ctx, cx - 50, H / 2 - 215, 100, 8, gold / MAX_GOLD, COL.gold);
-      bar(ctx, cx - 50, H / 2 - 203, 100, 6, hp / 100, side === "A" ? COL.A : COL.B);
+    const pill = `⏱ ${hh}:${mm}:${ss}   A ❤${world.hpA} × ❤${world.hpB} B   👑${world.winsA}–${world.winsB}`;
+    ctx.fillStyle = "rgba(0,0,0,.65)";
+    const pw = ctx.measureText(pill).width + 24;
+    ctx.fillRect(W / 2 - pw / 2, 8, pw, 24);
+    ctx.fillStyle = "#fff"; ctx.fillText(pill, W / 2 - pw / 2 + 12, 25);
+    for (const side of ["A", "B"]) {  // tesouraria compacta nos castelos
+      const cx = castleX(side), gold = side === "A" ? world.goldA : world.goldB;
+      bar(ctx, cx - 40, roadY() - 196, 80, 7, gold / MAX_GOLD, COL.gold);
+      ctx.fillStyle = "#fff"; ctx.font = "11px monospace";
+      const n = side === "A" ? world.marchA : world.marchB;
+      ctx.fillText(`⚔${n}`, cx + 44, roadY() - 188);
+      ctx.font = "13px monospace";
     }
-    ctx.fillStyle = "rgba(0,0,0,.7)";  // feed de eventos
-    const fh = world.feed.length * 18 + 14;
-    ctx.fillRect(W - 330, 10, 320, fh);
-    ctx.font = "12px monospace";
-    world.feed.forEach((line, i) => { ctx.fillStyle = i ? "#bbb" : "#fff"; ctx.fillText(line.slice(0, 44), W - 320, 28 + i * 18); });
+    if (!world.feed.length) return;
+    ctx.fillStyle = "rgba(0,0,0,.6)";
+    ctx.fillRect(W - 300, 8, 292, world.feed.length * 17 + 10);
+    ctx.font = "11px monospace";
+    world.feed.forEach((line, i) => { ctx.fillStyle = i ? "#bbb" : "#fff"; ctx.fillText(line.slice(0, 46), W - 292, 23 + i * 17); });
+    if (world.gameOver) {  // tela de vitória (congela até donate reiniciar)
+      ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ffd23f"; ctx.font = "bold 44px monospace"; ctx.textAlign = "center";
+      ctx.fillText(`🏆 ${world.gameOver} VENCEU!`, W / 2, H / 2 - 10);
+      ctx.fillStyle = "#fff"; ctx.font = "16px monospace";
+      ctx.fillText("envie um donate para nova campanha", W / 2, H / 2 + 26);
+      ctx.textAlign = "left";
+    }
   }
 
-  // ===== mensagens: estado interpola, eventos viram mundo =====
-  function onState(s) { world.tick = s.tick; world.goldA = s.base_A_gold; world.goldB = s.base_B_gold; }
+  // ===== mensagens do backend =====
+  function onState(s) {
+    world.tick = s.tick; world.goldA = s.base_A_gold; world.goldB = s.base_B_gold;
+    world.hpA = s.base_A_hp; world.hpB = s.base_B_hp;
+    world.marchA = s.march_A; world.marchB = s.march_B;
+    world.winsA = s.wins_A; world.winsB = s.wins_B;
+    if (s.game_over && world.celebrating !== s.game_over) {  // VITÓRIA: festa!
+      world.celebrating = s.game_over;
+      for (const u of world.units) if (u.side === s.game_over) u.cheer = true;
+      feed(`🎉 ${s.game_over} VENCEU! FESTA!`);
+    } else if (!s.game_over && world.celebrating) {  // nova campanha: acabou a festa
+      world.celebrating = null;
+      for (const u of world.units) u.cheer = false;
+    }
+    world.gameOver = s.game_over;
+  }
   function onEvent(e) {
     const m = e.event_msg || "";
     const sm = m.match(/Faction ([AB]) Spawn Soldier/);
-    if (sm) { onSpawn(sm[1]); feed(`⚔ ${sm[1]} recruta tropa`); return; }
+    if (sm) { const k = KINDS.includes(e.kind) ? e.kind : rndKind(); onSpawn(sm[1], k); feed(`⚔ ${sm[1]} recruta ${k}`); return; }
+    const hm = m.match(/([AB]) atinge\/hits o castelo ([AB])/);
+    if (hm) { onHit(hm[1]); feed(`💥 ${hm[1]} cerca ${hm[2]}`); return; }
+    if (/DESTROYS|WINS/i.test(m)) { feed("🏆 castelo caiu!"); return; }
+    if (/campanha|campaign/i.test(m)) { world.shots.length = 0; world.corpses.length = 0; feed("🚩 nova campanha"); return; }
     const dm = m.match(/Donate \+(\d+) to ([AB])/);
-    if (dm) { const cx = castleX(dm[2]); for (let i = 0; i < 6; i++) world.coins.push({ x: cx - 20 + i * 8, y: H / 2 - 120, life: 1 }); feed(`🪙 +${dm[1]} p/ ${dm[2]}`); return; }
+    if (dm) {
+      const cx = castleX(dm[2]);
+      for (let i = 0; i < 6; i++) world.coins.push({ x: cx - 20 + i * 8, y: roadY() - 120, life: 1 });
+      const thanked = world.units.filter(u => u.side === dm[2]);  // tropa agradece!
+      if (thanked.length) {
+        const u = thanked[hash(world.tick, dm[1]) % thanked.length];
+        if (!world.balloons.some(b => b.u === u)) say(u, pick(GRUNT_THANKS));
+      } else if (world.balloons.length < 6) {
+        world.balloons.push({ u: { x: cx, y: roadY() - 200 }, text: pick(GRUNT_THANKS), life: 2, fixed: true });
+      }
+      feed(`🪙 +${dm[1]} p/ ${dm[2]}`); return;
+    }
     feed(m.slice(0, 40));
   }
   function showNarration(text) {
@@ -202,23 +636,27 @@
   let last = performance.now(), frame = 0, facc = 0;
   function loop(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    facc += dt; if (facc > 0.5) { facc = 0; frame++; }  // bandeiras/anim em 2fps: leve
+    facc += dt; if (facc > 0.4) { facc = 0; frame++; }  // anims em ~2.5fps: leve
     update(dt); render(frame);
     requestAnimationFrame(loop);
   }
 
   function connect() {
-    const ws = new WebSocket("ws://localhost:8000/ws");
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
     ws.onmessage = (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       switch (msg.type) {
         case "game.state": onState(msg.data); break;
-        case "game.events": onEvent(msg.data); break;   // spawns viram soldados
+        case "game.events": onEvent(msg.data); break;
         case "narrator.broadcast": showNarration(msg.data.text); break;
       }
     };
     ws.onclose = () => setTimeout(connect, 2000);
   }
+  window.xbattle = { world, onEvent, onState };  // gancho p/ teste e debug
+  document.getElementById("rulesBtn").onclick = () =>
+    document.getElementById("rules").classList.toggle("show");
   resize(); connect(); requestAnimationFrame(loop);
 </script>
 </body>

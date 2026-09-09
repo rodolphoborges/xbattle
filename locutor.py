@@ -12,17 +12,27 @@ import redis.asyncio as redis
 VOICE = os.getenv("LOCUTOR_VOICE", "pt-BR-AntonioNeural")  # ou pt-BR-FranciscaNeural
 TEMP_PREFIX = os.getenv("LOCUTOR_TEMP_PREFIX", "tts_")
 
+
+def _voice() -> str:
+    """Lê env a cada chamada — permite trocar voz sem restart do import."""
+    return os.getenv("LOCUTOR_VOICE", VOICE)
+
+
+def _prefix() -> str:
+    """Lê env a cada chamada — permite trocar prefixo sem restart do import."""
+    return os.getenv("LOCUTOR_TEMP_PREFIX", TEMP_PREFIX)
+
 queue: asyncio.Queue[str] = asyncio.Queue()  # serializa: nunca sobrepõe áudios
 
 
 def _new_temp_file() -> str:
     """Arquivo único por item — nunca sobrescreve o que está tocando."""
-    return f"{TEMP_PREFIX}{uuid.uuid4().hex}.mp3"
+    return f"{_prefix()}{uuid.uuid4().hex}.mp3"
 
 
 def _cleanup_stale():
     """Remove mp3s órfãos de execuções anteriores (crash no meio do play)."""
-    for path in glob.glob(f"{TEMP_PREFIX}*.mp3"):
+    for path in glob.glob(f"{_prefix()}*.mp3"):
         try:
             os.remove(path)
         except OSError:
@@ -43,18 +53,32 @@ async def _speak(path: str):
 
 async def producer():
     """Task A: assina narrator.broadcast e enfileira o texto."""
-    sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    ps = sub.pubsub()
-    await ps.subscribe("narrator.broadcast")
-    async for msg in ps.listen():
-        if msg.get("type") != "message":
-            continue
+    while True:  # auto-reconnect: Redis caiu, reassina
+        sub = None
         try:
-            text = json.loads(msg["data"])["text"]
-        except (json.JSONDecodeError, TypeError, KeyError):
-            continue
-        if text:
-            await queue.put(text)
+            sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
+            ps = sub.pubsub()
+            await ps.subscribe("narrator.broadcast")
+            async for msg in ps.listen():
+                if msg.get("type") != "message":
+                    continue
+                try:
+                    text = json.loads(msg["data"])["text"]
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    continue
+                if text:
+                    await queue.put(text)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            print(f"[locutor] producer reconnecting: {e!r}")
+            await asyncio.sleep(2)
+        finally:
+            if sub is not None:
+                try:
+                    await sub.aclose()
+                except Exception:
+                    pass
 
 
 async def consumer():
@@ -65,7 +89,7 @@ async def consumer():
         text = await queue.get()
         path = _new_temp_file()
         try:
-            await edge_tts.Communicate(text, VOICE).save(path)
+            await edge_tts.Communicate(text, _voice()).save(path)
             await _speak(path)
         except Exception as e:  # rede/áudio falhou -> worker sobrevive
             print(f"[locutor] falhou item, pulando: {e!r}")

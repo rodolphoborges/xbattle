@@ -13,22 +13,36 @@ clients: set[WebSocket] = set()  # active WS connections
 
 async def redis_pump():
     """Single background task: Redis -> enveloped broadcast to all WS."""
-    sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    ps = sub.pubsub()
-    await ps.subscribe(*CHANNELS)
-    async for msg in ps.listen():
-        if msg.get("type") != "message":
-            continue
+    while True:  # auto-reconnect: Redis caiu, reassina
+        sub = None
         try:
-            data = json.loads(msg["data"])
-        except (json.JSONDecodeError, TypeError):
-            continue
-        envelope = json.dumps({"type": msg["channel"], "data": data})
-        for ws in list(clients):  # copy: removal during iteration
-            try:
-                await ws.send_text(envelope)
-            except Exception:  # zombie/disconnected -> drop instantly
-                clients.discard(ws)
+            sub = redis.Redis(host="localhost", port=6379, decode_responses=True)
+            ps = sub.pubsub()
+            await ps.subscribe(*CHANNELS)
+            async for msg in ps.listen():
+                if msg.get("type") != "message":
+                    continue
+                try:
+                    data = json.loads(msg["data"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                envelope = json.dumps({"type": msg["channel"], "data": data})
+                for ws in list(clients):  # copy: removal during iteration
+                    try:
+                        await ws.send_text(envelope)
+                    except Exception:  # zombie/disconnected -> drop instantly
+                        clients.discard(ws)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            print(f"[gateway] pump reconnecting: {e!r}")
+            await asyncio.sleep(2)
+        finally:
+            if sub is not None:
+                try:
+                    await sub.aclose()
+                except Exception:
+                    pass
 
 
 @asynccontextmanager
