@@ -12,7 +12,7 @@ pip install -r requirements.txt
 # Redis em localhost:6379 (sem Docker neste repo)
 python engine.py        # terminal 1
 python cronista.py      # terminal 2
-python injector.py      # terminal 3 — digite "A 50"
+python injector.py      # terminal 3 — "A 50" (donate) ou "recruit A", "heal B", "rally A", "curse A", "omen A"
 uvicorn gateway:app --port 8000  # terminal 4 — abra http://localhost:8000
 python locutor.py       # terminal 5 (opcional, precisa saída de áudio)
 ```
@@ -30,6 +30,9 @@ CRONISTA_MAX_SILENCE=10
 LOCUTOR_VOICE=pt-BR-AntonioNeural
 LOCUTOR_TEMP_PREFIX=tts_
 ```
+
+`LLM_PROVIDER` é só etiqueta informativa (LOCAL|CLOUD) — o código não a lê;
+`_client()` usa apenas `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL_NAME`.
 
 ## Arquitetura
 
@@ -72,7 +75,7 @@ Ações do taverneiro:
 | `heal A` | +10 HP (teto 100) | +3 |
 | `rally A` | ouro dobrado 60s | +3 |
 | `curse A` | congela ouro de B 30s | +3 |
-| `omen A` | presságio aleatório | +5 |
+| `omen A` | presságio aleatório | +5 (só no omen manual; o omen idle automático não dá favor) |
 
 ## Entrypoints
 

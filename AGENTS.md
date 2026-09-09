@@ -13,7 +13,7 @@
 - `game.state`: `{"tick","camp_tick","era","base_A_gold","base_B_gold","base_A_hp","base_B_hp","march_A","march_B","favor_A","favor_B","wins_A","wins_B","game_over","restart_in"}` — todo tick (`TICK_RATE=1.0s`).
 - `game.events`: `{"tick":int,"event_msg":str,"kind"?}` — spawn + donate + hit + vitória + era + omen + momentum + campanha.
 - `narrator.broadcast`: `{"text":str,"timestamp":int}` — produced by `cronista.py` only.
-- Run order: Redis → `python engine.py` → `python cronista.py` → `python injector.py` (3 terminals) + `uvicorn gateway:app --port 8000` for the viewer (open `http://localhost:8000`) + `python locutor.py` 4th (TTS p/ OBS).
+- Run order: Redis → `python engine.py` → `python cronista.py` → `python injector.py` + `uvicorn gateway:app --port 8000` for the viewer (open `http://localhost:8000`) + `python locutor.py` (TTS p/ OBS) — 5 processos/terminais.
 
 ## Entrypoints / ownership
 - `engine.py`: `tick_loop(pub)` (sole writer, 1 tps, spawn at gold>=`SPAWN_AT`=100 then reset, ~100s natural spawn) + `cmd_listener(pub)` (sole reader). Separate Redis conns for pub vs sub; `asyncio.gather` both in `main()`. Pass `pub` as arg, never global-None. Engine real: eras `colheita/guerra/crepusculo` (`1200/3000/3600` ticks), `MARCH_TICKS=25`, `SIEGE_DMG=5`, `CASTLE_HP=100`, morte súbita pós-crepúsculo, `favor/wins`, momentum (3 hits), `rally/freeze/eclipse`, `omen` idle 600s, `eclipse_until` zerado no `_restart`, donate `value<=0` ignorado, empate na morte súbita decidido por `favor` (sorteio se igual).
@@ -23,7 +23,7 @@
 - `locutor.py`: TTS worker, `asyncio.Queue` (producer `narrator.broadcast` → consumer serial). Voice `pt-BR-AntonioNeural` (override dinâmico via `LOCUTOR_VOICE`, alt `pt-BR-FranciscaNeural`). Each item gets a unique `tts_<uuid>.mp3` (prefix dinâmico via `LOCUTOR_TEMP_PREFIX`) — never overwrite a file under playback; after play, `mixer.music.unload()` then `os.remove`; partials deleted on failure, stale `tts_*.mp3` cleaned at startup. No `time.sleep()` — only `await asyncio.sleep()`. Run 4th: `python locutor.py` (needs audio output for OBS capture).
 
 ## Env / LLM (.env, loaded with optional `load_dotenv`)
-- `LLM_PROVIDER` (LOCAL|CLOUD), `LLM_BASE_URL` (default `http://localhost:11434/v1`), `LLM_API_KEY` (default `ollama`), `LLM_MODEL_NAME` (default `llama3:8b`), `LLM_MAX_TOKENS` (default `1200`). `_client()` reads env on every call — keep it dynamic for LOCAL↔CLOUD switching.
+- `LLM_PROVIDER` (LOCAL|CLOUD, só etiqueta informativa — não lida pelo código), `LLM_BASE_URL` (default `http://localhost:11434/v1`), `LLM_API_KEY` (default `ollama`), `LLM_MODEL_NAME` (default `llama3:8b`), `LLM_MAX_TOKENS` (default `1200`). `_client()` reads env on every call — keep it dynamic for LOCAL↔CLOUD switching.
 - `SYSTEM_PROMPT` (pt-BR, narrador frenético de eSports, max 3 frases, sem raciocínio exposto — clause 3 economiza tokens em modelos reasoning) is spec-frozen — do not reword. `FALLBACK_TEXT` must stay non-empty, no emojis/hashtags.
 - Local LM Studio (this box): server at `http://localhost:1234/v1`, chat model `google/gemma-4-12b`, dummy key `lm-studio`. `.env` is gitignored — never commit it. List models via `GET /v1/models`.
 - Reasoning models (Gemma) burn a variable 300-700+ tokens thinking: tight budgets return empty (`finish_reason=length`, text in `reasoning_content`). Default `1200` + 1 retry on empty inside `generate_commentary`; `enable_thinking:false` was probed and is ignored by this model. Verified 2026-09-08 with gemma-4-12b (3/3 non-empty).
