@@ -182,10 +182,10 @@
     }
   }
 
-  // corpo caído permanente: deitado + elmo ao lado + olhinhos X
+  // corpo caído permanente: uniforme do time mesmo na morte + elmo ao lado + olhinhos X
   function drawCorpse(g, cp) {
-    const d = cp.side === "A" ? COL.Ad : COL.Bd;
-    g.fillStyle = cp.kind === "mago" ? "#7c3aed" : d;
+    const c = cp.side === "A" ? COL.A : COL.B;
+    g.fillStyle = c;
     g.fillRect(cp.x - 7, cp.y - 8, 14, 6);                       // corpo deitado
     g.fillStyle = COL.skin; g.fillRect(cp.x + 7, cp.y - 8, 5, 5); // cabeça
     g.fillStyle = "#111";                                         // X nos olhos
@@ -207,21 +207,23 @@
     // botas
     g.fillStyle = "#3b2a1a"; g.fillRect(x - 4, y - 6, 3, 6 + (leg > 0 ? 2 : 0)); g.fillRect(x + 1, y - 6, 3, 6 + (leg < 0 ? 2 : 0));
     if (u.kind === "mago") {
-      g.fillStyle = "#7c3aed"; g.fillRect(x - 4, y - 24 + bob, 8, 18);   // manto longo roxo
-      g.fillStyle = c; g.fillRect(x - 4, y - 18 + bob, 8, 3);            // faixa da facção
+      g.fillStyle = c; g.fillRect(x - 4, y - 24 + bob, 8, 18);   // manto LONGO na cor do time
+      g.fillStyle = COL.gold; g.fillRect(x - 4, y - 18 + bob, 8, 2);   // vivo dourado do uniforme
       g.fillStyle = "#ddd"; g.fillRect(x - 2, y - 22 + bob, 4, 6);       // barba grisalha
       g.fillStyle = sk; g.fillRect(x - 2, y - 28 + bob, 4, 4);           // rosto
-      g.fillStyle = "#4c1d95";                                          // chapéu + aba + ponta
+      g.fillStyle = d;                                          // chapéu do time + aba + ponta
       g.fillRect(x - 5, y - 34 + bob, 10, 7); g.fillRect(x - 6, y - 29 + bob, 12, 2);
       g.fillRect(x + 2, y - 38 + bob, 4, 5);
+      g.fillStyle = COL.gold; g.fillRect(x - 5, y - 30 + bob, 10, 1);    // faixa do chapéu
       g.fillStyle = COL.wood; g.fillRect(x + dir * 5, y - 32 + bob, 2, 20); // cajado
       const orb = 3 + (f % 2);                                          // orbe pulsante
       g.fillStyle = "#22d3ee"; g.fillRect(x + dir * 5 - 1, y - 36 + bob, orb + 1, orb + 1);
     } else if (u.kind === "arqueiro") {
-      g.fillStyle = "#4a5d23"; g.fillRect(x - 4, y - 24 + bob, 8, 12);   // túnica verde
-      g.fillStyle = "#3a4a1c"; g.fillRect(x - 5, y - 34 + bob, 10, 6);   // capuz
-      g.fillStyle = "#3a4a1c"; g.fillRect(x - 2, y - 38 + bob, 4, 5);    // ponta do capuz
+      g.fillStyle = c; g.fillRect(x - 4, y - 24 + bob, 8, 12);   // túnica na cor do time
+      g.fillStyle = d; g.fillRect(x - 5, y - 34 + bob, 10, 6);   // capuz do time
+      g.fillStyle = d; g.fillRect(x - 2, y - 38 + bob, 4, 5);    // ponta do capuz
       g.fillStyle = sk; g.fillRect(x - 2, y - 29 + bob, 4, 5);           // rosto na sombra
+      g.fillStyle = COL.gold; g.fillRect(x - 4, y - 14 + bob, 8, 1);     // cinto do uniforme
       g.fillStyle = COL.wood; g.fillRect(x - dir * 6, y - 28 + bob, 2, 14); // aljava nas costas
       g.fillStyle = "#ddd";
       g.fillRect(x - dir * 6, y - 31 + bob, 2, 3); g.fillRect(x - dir * 6, y - 28 + bob, 2, 2); // flechas
@@ -435,6 +437,7 @@
     // arqueiro/mago: param e atiram à distância; guerreiro: corpo a corpo
     for (const u of world.units) {
       const reach = RANGE[u.kind] || 12;
+      if (u.sieging) { u.hold = true; u.target = null; continue; }  // cercando: não anda nem mira, só bate
       u.hold = false; u.target = null;
       if (reach > 12) {
         const foe = nearestFoe(u, reach);
@@ -473,16 +476,37 @@
         break;
       }
     }
-    // chegada visual ao castelo (HP real vem do backend via hit/state)
-    for (let i = world.units.length - 1; i >= 0; i--) {
-      const u = world.units[i], target = castleX(u.side === "A" ? "B" : "A");
+    // chegada: em vez de sumir, o soldado CERCA o portão (3 golpes visuais, depois some na brecha)
+    for (const u of world.units) {
+      if (u.sieging) continue;
+      const target = castleX(u.side === "A" ? "B" : "A");
       if ((u.side === "A" && u.x >= target - 50) || (u.side === "B" && u.x <= target + 50)) {
+        u.sieging = true; u.siegeT = 0; u.struck = 0; u.hold = true;
         const dir = u.side === "A" ? 1 : -1;   // rastro: liga o soldado ao portão
         for (let k = 0; k < 4 && world.sparks.length < MAX_SPARKS; k++)
           world.sparks.push({ x: u.x - dir * k * 6, y: u.y - 10 - (k % 2) * 6,
                               vx: dir * 30, vy: -10, life: 0.7, col: "#fff" });
-        world.units.splice(i, 1);
         if (world.balloons.length < 6) world.balloons.push({ u: { x: target, y: roadY() - 70 }, text: pick(GRUNT_SIEGE), life: 1.8, fixed: true });
+      }
+    }
+    for (let i = world.units.length - 1; i >= 0; i--) {  // sequência do cerco: 3 golpes e some na brecha
+      const u = world.units[i];
+      if (!u.sieging) continue;
+      u.siegeT += dt;
+      const gate = castleX(u.side === "A" ? "B" : "A");
+      if (u.siegeT >= (u.struck + 1) * 0.3) {
+        u.struck++; u.lunge = 0.18;   // pose de golpe (reusa o arco de corte)
+        const dir = u.side === "A" ? 1 : -1;
+        for (let k = 0; k < 6 && world.sparks.length < MAX_SPARKS; k++)
+          world.sparks.push({ x: gate - dir * 10 + (k % 3) * 6, y: roadY() - 10 - (k % 2) * 10,
+                              vx: -dir * (20 + (k % 3) * 15), vy: -50 - (k % 3) * 10, life: 0.8,
+                              col: k % 2 ? "#ffd23f" : "#fff" });
+        if (u.side === "A") world.shakeB = Math.max(world.shakeB, 0.18);
+        else world.shakeA = Math.max(world.shakeA, 0.18);
+      }
+      if (u.struck >= 3) {
+        world.units.splice(i, 1);
+        world.marks.push({ x: gate, y: roadY() - 40, life: 0.9 });
       }
     }
     // tagarelice da marcha (repertório do clima) + ameaças ao avistar inimigo
